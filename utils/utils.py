@@ -5,13 +5,43 @@ import tensorflow.contrib.slim as slim
 import numpy as np
 import time, datetime
 import os, random
-from scipy.misc import imread
+# from scipy.misc import imread
 import ast
 from sklearn.metrics import precision_score, \
     recall_score, confusion_matrix, classification_report, \
     accuracy_score, f1_score
 
 from utils import helpers
+
+def prepare_data_with_depth(dataset_dir):
+    train_input_names=[]
+    train_input_depth_names=[]
+    train_output_names=[]
+    val_input_names=[]
+    val_input_depth_names=[]
+    val_output_names=[]
+    test_input_names=[]
+    test_input_depth_names=[]
+    test_output_names=[]
+    
+    arrays_arr = [(train_input_names, "train"),
+                  (train_input_depth_names, "train_depth"),
+                  (train_output_names, "train_labels"),
+                  (val_input_names, "val"),
+                  (val_input_depth_names, "val_depth"),
+                  (val_output_names, "val_labels"),
+                  (test_input_names, "test"),
+                  (test_input_depth_names, "test_depth"),
+                  (test_output_names, "test_labels")]
+    
+    for arr,dir_prefix in arrays_arr:
+        for file in os.listdir(dataset_dir + "/" + dir_prefix):
+            arr.append(dataset_dir + "/" + dir_prefix + "/" + file)
+        
+        arr.sort()
+    
+    arrays, names = zip(*arrays_arr)
+    return arrays
 
 def prepare_data(dataset_dir):
     train_input_names=[]
@@ -20,6 +50,7 @@ def prepare_data(dataset_dir):
     val_output_names=[]
     test_input_names=[]
     test_output_names=[]
+        
     for file in os.listdir(dataset_dir + "/train"):
         cwd = os.getcwd()
         train_input_names.append(cwd + "/" + dataset_dir + "/train/" + file)
@@ -42,7 +73,11 @@ def prepare_data(dataset_dir):
     return train_input_names,train_output_names, val_input_names, val_output_names, test_input_names, test_output_names
 
 def load_image(path):
-    image = cv2.cvtColor(cv2.imread(path,-1), cv2.COLOR_BGR2RGB)
+    image = cv2.imread(path,-1)
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    if len(image.shape) == 3 and image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
     return image
 
 # Takes an absolute file path and returns the name of the file without th extension
@@ -268,7 +303,7 @@ def compute_class_weights(labels_dir, label_values):
     total_pixels = 0.0
 
     for n in range(len(image_files)):
-        image = imread(image_files[n])
+        image = cv2.imread(image_files[n])
 
         for index, colour in enumerate(label_values):
             class_map = np.all(np.equal(image, colour), axis = -1)

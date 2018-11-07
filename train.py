@@ -8,6 +8,7 @@ import argparse
 import random
 import os, sys
 import subprocess
+import pandas as pd
 
 # use 'Agg' on matplotlib so that plots could be generated even without Xserver
 # running
@@ -89,7 +90,7 @@ sess=tf.Session(config=config)
 
 
 # Compute your softmax cross entropy loss
-net_input = tf.placeholder(tf.float32,shape=[None,None,None,3])
+net_input = tf.placeholder(tf.float32,shape=[None,None,None,4])
 net_output = tf.placeholder(tf.float32,shape=[None,None,None,num_classes])
 
 network, init_fn = model_builder.build_model(model_name=args.model, frontend=args.frontend, net_input=net_input, num_classes=num_classes, crop_width=args.crop_width, crop_height=args.crop_height, is_training=True)
@@ -109,14 +110,14 @@ if init_fn is not None:
     init_fn(sess)
 
 # Load a previous checkpoint if desired
-model_checkpoint_name = "checkpoints/latest_model_" + args.model + "_" + args.dataset + ".ckpt"
+model_checkpoint_name = "checkpoints/latest_model_" + args.model + "_" + os.path.basename(args.dataset) + ".ckpt"
 if args.continue_training:
-    print('Loaded latest model checkpoint')
+    print('Loading latest model checkpoint from: %s'%model_checkpoint_name)
     saver.restore(sess, model_checkpoint_name)
 
 # Load the data
 print("Loading the data ...")
-train_input_names,train_output_names, val_input_names, val_output_names, test_input_names, test_output_names = utils.prepare_data(dataset_dir=args.dataset)
+train_input_names, train_input_depth_names, train_output_names, val_input_names, val_input_depth_names, val_output_names, test_input_names, test_input_depth_names, test_output_names = utils.prepare_data_with_depth(dataset_dir=args.dataset)
 
 
 
@@ -128,6 +129,9 @@ print("Crop Width -->", args.crop_width)
 print("Num Epochs -->", args.num_epochs)
 print("Batch Size -->", args.batch_size)
 print("Num Classes -->", num_classes)
+print("Num train images -->", len(train_input_names))
+print("Num val images -->", len(val_input_names))
+print("Num test images -->", len(test_input_names))
 
 print("Data Augmentation:")
 print("\tVertical Flip -->", args.v_flip)
@@ -173,6 +177,13 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
             index = i*args.batch_size + j
             id = id_list[index]
             input_image = utils.load_image(train_input_names[id])
+            
+            # add the depth as the last channel to input
+            input_depth_image = utils.load_image(train_input_depth_names[id])
+            input_image = np.dstack((input_image, input_depth_image))
+#            print(input_image.shape)
+#            print(pd.DataFrame(input_image.reshape(-1,4)).describe())
+            
             output_image = utils.load_image(train_output_names[id])
 
             with tf.device('/cpu:0'):
@@ -181,7 +192,11 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
 
                 # Prep the data. Make sure the labels are in one-hot format
                 input_image = np.float32(input_image) / 255.0
-                output_image = np.float32(helpers.one_hot_it(label=output_image, label_values=label_values))
+                output_image = np.float32(helpers.one_hot_it(label=output_image, label_values=label_values, tolerance=50))
+#                print(pd.DataFrame(output_image.reshape(-1,len(label_values))).describe())
+
+#                out_vis_image = helpers.colour_code_segmentation(helpers.reverse_one_hot(output_image), label_values)
+#                cv2.imwrite("/tmp/net_in_labels.png",out_vis_image)
 
                 input_image_batch.append(np.expand_dims(input_image, axis=0))
                 output_image_batch.append(np.expand_dims(output_image, axis=0))
@@ -210,12 +225,13 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
         os.makedirs("%s/%04d"%("checkpoints",epoch))
 
     # Save latest checkpoint to same file name
-    print("Saving latest checkpoint")
+    print("Saving latest checkpoint:", model_checkpoint_name)
     saver.save(sess,model_checkpoint_name)
 
     if val_indices != 0 and epoch % args.checkpoint_step == 0:
-        print("Saving checkpoint for this epoch")
-        saver.save(sess,"%s/%04d/model.ckpt"%("checkpoints",epoch))
+        epoch_ckpt_filename = "%s/%04d/model.ckpt"%("checkpoints",epoch)
+        print("Saving checkpoint for this epoch:",epoch_ckpt_filename)
+        saver.save(sess,epoch_ckpt_filename)
 
 
     if epoch % args.validation_step == 0:
@@ -235,9 +251,22 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
         # Do the validation on a small set of validation images
         for ind in val_indices:
 
-            input_image = np.expand_dims(np.float32(utils.load_image(val_input_names[ind])[:args.crop_height, :args.crop_width]),axis=0)/255.0
-            gt = utils.load_image(val_output_names[ind])[:args.crop_height, :args.crop_width]
-            gt = helpers.reverse_one_hot(helpers.one_hot_it(gt, label_values))
+            input_image = utils.load_image(val_input_names[ind])
+            
+            # add the depth as the last channel to input
+            input_depth_image = utils.load_image(val_input_depth_names[ind])
+            input_image = np.dstack((input_image, input_depth_image))
+
+            # crop the exact middle of the image
+            in_h,in_w = input_image.shape[:2]
+            crp_x = int(in_w/2)-int(args.crop_width/2)
+            crp_y = int(in_h/2)-int(args.crop_height/2)
+            
+            input_cropped = input_image[crp_y:crp_y+512,crp_x:crp_x+512]
+            input_image = np.expand_dims(np.float32(input_cropped),axis=0)/255.0
+            
+            gt = utils.load_image(val_output_names[ind])[crp_y:crp_y+512,crp_x:crp_x+512]
+            gt = helpers.reverse_one_hot(helpers.one_hot_it(gt, label_values, tolerance=50))
 
             # st = time.time()
 

@@ -34,7 +34,7 @@ def get_label_info(csv_path):
     return class_names, label_values
 
 
-def one_hot_it(label, label_values):
+def one_hot_it(label, label_values, tolerance=0):
     """
     Convert a segmentation image label array to one-hot format
     by replacing each pixel value with a vector of length num_classes
@@ -65,10 +65,17 @@ def one_hot_it(label, label_values):
     semantic_map = []
     for colour in label_values:
         # colour_map = np.full((label.shape[0], label.shape[1], label.shape[2]), colour, dtype=int)
-        equality = np.equal(label, colour)
+        if tolerance > 0:
+            equality = np.isclose(label, colour, atol=tolerance)
+        else:
+            equality = np.equal(label, colour)
         class_map = np.all(equality, axis = -1)
         semantic_map.append(class_map)
     semantic_map = np.stack(semantic_map, axis=-1)
+    
+    # make sure pixels without any hit are classified as "void" - assuming it's the last category (-1)
+    semantic_map[np.logical_not(np.any(semantic_map, axis=-1)),-1] = 1
+    
     # print("Time 2 = ", time.time() - st)
 
     return semantic_map
