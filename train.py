@@ -9,6 +9,9 @@ import random
 import os, sys
 import subprocess
 import pandas as pd
+import missinglink
+
+missinglink_project = missinglink.TensorFlowProject(project='5730650862649344')
 
 # use 'Agg' on matplotlib so that plots could be generated even without Xserver
 # running
@@ -97,10 +100,27 @@ network, init_fn = model_builder.build_model(model_name=args.model, frontend=arg
 
 loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=network, labels=net_output))
 
+with tf.name_scope('train'):
+    train_acc, train_acc_op = tf.metrics.accuracy(labels=tf.argmax(net_output, -1),   
+                                      predictions=tf.argmax(network, -1))
+
+    train_miou, train_miou_op = tf.metrics.mean_iou(labels=tf.argmax(net_output, -1),   
+                                      predictions=tf.argmax(network, -1),
+                                        num_classes=num_classes)
+
+with tf.name_scope('val'):
+    val_acc, val_acc_op = tf.metrics.accuracy(labels=tf.argmax(net_output, -1),   
+                                      predictions=tf.argmax(network, -1))
+
+    val_miou, val_miou_op = tf.metrics.mean_iou(labels=tf.argmax(net_output, -1),   
+                                      predictions=tf.argmax(network, -1),
+                                        num_classes=num_classes)
+
 opt = tf.train.RMSPropOptimizer(learning_rate=0.0001, decay=0.995).minimize(loss, var_list=[var for var in tf.trainable_variables()])
 
 saver=tf.train.Saver(max_to_keep=1000)
 sess.run(tf.global_variables_initializer())
+sess.run(tf.local_variables_initializer())
 
 utils.count_params()
 
@@ -153,218 +173,170 @@ num_vals = min(args.num_val_images, len(val_input_names))
 random.seed(16)
 val_indices=random.sample(range(0,len(val_input_names)),num_vals)
 
-# Do the training here
-for epoch in range(args.epoch_start_i, args.num_epochs):
+# calculate the start crop coords for the exact middle of the image
+in_h,in_w = cv2.imread(train_input_names[0]).shape[:2]
+crp_x = int(in_w/2)-int(args.crop_width/2)
+crp_y = int(in_h/2)-int(args.crop_height/2)
 
-    current_losses = []
 
-    cnt=0
+with missinglink_project.create_experiment(
+    display_name='%s %s'%(args.model, args.dataset),
+    description='...') as experiment:
+    
+    NUM_SAMPLE = len(train_input_names)
+    NUM_BATCHES = int(NUM_SAMPLE / args.batch_size)
 
-    # Equivalent to shuffling
-    id_list = np.random.permutation(len(train_input_names))
+    miou_history = []
 
-    num_iters = int(np.floor(len(id_list) / args.batch_size))
-    st = time.time()
-    epoch_st=time.time()
-    for i in range(num_iters):
-        # st=time.time()
+    # Do the training here
+    for epoch in experiment.epoch_loop(args.num_epochs):
 
-        input_image_batch = []
-        output_image_batch = []
+        current_losses = []
 
-        # Collect a batch of images
-        for j in range(args.batch_size):
-            index = i*args.batch_size + j
-            id = id_list[index]
-            input_image = utils.load_image(train_input_names[id])
+        cnt=0
+
+        # Equivalent to shuffling
+        id_list = np.random.permutation(len(train_input_names))
+
+        st = time.time()
+        epoch_st=time.time()
+        
+        for i in experiment.batch_loop(NUM_BATCHES):
+
+            input_image_batch = []
+            output_image_batch = []
+
+            # Collect a batch of images
+            for j in range(args.batch_size):
+                index = i*args.batch_size + j
+                id = id_list[index]
+                input_image = utils.load_image(train_input_names[id])
+
+                # add the depth as the last channel to input
+                input_depth_image = utils.load_image(train_input_depth_names[id])
+                if len(input_depth_image.shape) == 3 and input_depth_image.shape[2] == 3:
+                    input_depth_image = cv2.cvtColor(input_depth_image, cv2.COLOR_BGR2GRAY)
+                input_image = np.dstack((input_image, input_depth_image))
+
+                output_image = utils.load_image(train_output_names[id])
+
+                with tf.device('/cpu:0'):
+                    input_image, output_image = data_augmentation(input_image, output_image)
+
+                    # Prep the data. Make sure the labels are in one-hot format
+                    input_image = np.float32(input_image) / 255.0
+                    output_image = np.float32(helpers.one_hot_it(label=output_image, label_values=label_values, tolerance=50))
+
+                    input_image_batch.append(np.expand_dims(input_image, axis=0))
+                    output_image_batch.append(np.expand_dims(output_image, axis=0))
+
+            if args.batch_size == 1:
+                input_image_batch = input_image_batch[0]
+                output_image_batch = output_image_batch[0]
+            else:
+                input_image_batch = np.squeeze(np.stack(input_image_batch, axis=1))
+                output_image_batch = np.squeeze(np.stack(output_image_batch, axis=1))
+
+            # Do the training
+            with experiment.train(monitored_metrics={'loss': loss, 'acc': train_acc, 'miou': train_miou}):
+                _,current,_,_=sess.run([opt,loss,train_acc_op,train_miou_op],feed_dict={net_input:input_image_batch,
+                                                                          net_output:output_image_batch})
+                        
+            current_losses.append(current)
+            cnt = cnt + args.batch_size
             
-            # add the depth as the last channel to input
-            input_depth_image = utils.load_image(train_input_depth_names[id])
-            if len(input_depth_image.shape) == 3 and input_depth_image.shape[2] == 3:
-                input_depth_image = cv2.cvtColor(input_depth_image, cv2.COLOR_BGR2GRAY)
-            input_image = np.dstack((input_image, input_depth_image))
-#            print(input_image.shape)
-#            print(pd.DataFrame(input_image.reshape(-1,4)).describe())
+            if cnt % 20 == 0:
+                val_shuffle = np.random.permutation(len(val_indices))
+                # Do the validation on a small set of validation images
+                with experiment.validation(monitored_metrics={'loss': loss, 'acc': val_acc, 'miou': val_miou}):
+                    for ind in val_shuffle[:10]:
+                        rand_ind = val_indices[ind]
+                        input_image = utils.load_image(val_input_names[rand_ind])
+
+                        # add the depth as the last channel to input
+                        input_depth_image = utils.load_image(val_input_depth_names[rand_ind])
+                        if len(input_depth_image.shape) == 3 and input_depth_image.shape[2] == 3:
+                            input_depth_image = cv2.cvtColor(input_depth_image, cv2.COLOR_BGR2GRAY)
+                        input_image = np.dstack((input_image, input_depth_image))
+
+                        input_cropped = input_image[crp_y:crp_y+512,crp_x:crp_x+512]
+                        input_image = np.expand_dims(np.float32(input_cropped),axis=0)/255.0
+
+                        gt = utils.load_image(val_output_names[rand_ind])[crp_y:crp_y+512,crp_x:crp_x+512]
+                        gt = np.expand_dims(helpers.one_hot_it(gt, label_values, tolerance=50), axis=0)
+
+                        _,_,_ = sess.run([loss,val_acc_op,val_miou_op],feed_dict={net_input:input_image,net_output:gt})
+                
+                    curr_val_miou = sess.run(val_miou,feed_dict={net_input:input_image,net_output:gt})
+                    
+                string_print = "Epoch = %d Count = %d/%d Current_Loss = %.4f Time = %.2f Val mIOU = %.3f"%(epoch,cnt,len(train_input_names),current,time.time()-st,curr_val_miou)
+                utils.LOG(string_print)
+                st = time.time()
+
+        mean_loss = np.mean(current_losses)
+        avg_loss_per_epoch.append(mean_loss)
+
+        # Create directories if needed
+        if not os.path.isdir("%s/%04d"%("checkpoints",epoch)):
+            os.makedirs("%s/%04d"%("checkpoints",epoch))
+
+        # Save latest checkpoint to same file name
+        print("Saving latest checkpoint:", model_checkpoint_name)
+        saver.save(sess,model_checkpoint_name)
+
+        if epoch % args.validation_step == 0:
+            print("Performing validation")
+            with experiment.validation():
+                # re-init val metrics counters
+                stream_vars_valid = [v for v in tf.local_variables() if 'valid/' in v.name]
+                sess.run(tf.variables_initializer(stream_vars_valid))
+
+                for ind in val_indices:
+                    input_image = utils.load_image(val_input_names[ind])
+
+                    # add the depth as the last channel to input
+                    input_depth_image = utils.load_image(val_input_depth_names[ind])
+                    if len(input_depth_image.shape) == 3 and input_depth_image.shape[2] == 3:
+                        input_depth_image = cv2.cvtColor(input_depth_image, cv2.COLOR_BGR2GRAY)
+                    input_image = np.dstack((input_image, input_depth_image))
+
+                    input_cropped = input_image[crp_y:crp_y+512,crp_x:crp_x+512]
+                    input_image = np.expand_dims(np.float32(input_cropped),axis=0)/255.0
+
+                    gt = utils.load_image(val_output_names[ind])[crp_y:crp_y+512,crp_x:crp_x+512]
+                    gt = np.expand_dims(helpers.one_hot_it(gt, label_values, tolerance=50), axis=0)
+
+                    output_image,_,_ = sess.run([network,val_acc_op,val_miou_op],feed_dict={net_input:input_image,net_output:gt})
+                    curr_val_miou,curr_val_acc = sess.run([val_miou,val_acc],feed_dict={net_input:input_image,net_output:gt})
+
+                    output_image = np.array(output_image[0,:,:,:])
+                    output_image = helpers.reverse_one_hot(output_image)
+                    out_vis_image = helpers.colour_code_segmentation(output_image, label_values)
+
+                    gt = helpers.colour_code_segmentation(helpers.reverse_one_hot(gt[0,:,:,:]), label_values)
+
+                    file_name = os.path.splitext(os.path.basename(val_input_names[ind]))[0]
+                    cv2.imwrite("%s/%04d/%s_pred.png"%("checkpoints",epoch, file_name),cv2.cvtColor(np.uint8(out_vis_image), cv2.COLOR_RGB2BGR))
+                    cv2.imwrite("%s/%04d/%s_gt.png"%("checkpoints",epoch, file_name),cv2.cvtColor(np.uint8(gt), cv2.COLOR_RGB2BGR))
             
-            output_image = utils.load_image(train_output_names[id])
+            if (len(miou_history) > 0) and (curr_val_miou > np.max(miou_history)):
+                epoch_ckpt_filename = "%s/best_model" + args.model + "_" + os.path.basename(args.dataset) + ".ckpt"%("checkpoints")
+                print("Record miou - saving weights for this epoch:",epoch_ckpt_filename)
+                saver.save(sess,epoch_ckpt_filename)
+            
+            miou_history += [curr_val_miou]
 
-            with tf.device('/cpu:0'):
-                input_image, output_image = data_augmentation(input_image, output_image)
+            print("\nAverage validation accuracy for epoch # %04d = %f"% (epoch, curr_val_acc))
+            print("Validation IoU score = ", curr_val_miou)
 
-
-                # Prep the data. Make sure the labels are in one-hot format
-                input_image = np.float32(input_image) / 255.0
-                output_image = np.float32(helpers.one_hot_it(label=output_image, label_values=label_values, tolerance=50))
-#                print(pd.DataFrame(output_image.reshape(-1,len(label_values))).describe())
-
-#                out_vis_image = helpers.colour_code_segmentation(helpers.reverse_one_hot(output_image), label_values)
-#                cv2.imwrite("/tmp/net_in_labels.png",out_vis_image)
-
-                input_image_batch.append(np.expand_dims(input_image, axis=0))
-                output_image_batch.append(np.expand_dims(output_image, axis=0))
-
-        if args.batch_size == 1:
-            input_image_batch = input_image_batch[0]
-            output_image_batch = output_image_batch[0]
+        epoch_time=time.time()-epoch_st
+        remain_time=epoch_time*(args.num_epochs-1-epoch)
+        m, s = divmod(remain_time, 60)
+        h, m = divmod(m, 60)
+        if s!=0:
+            train_time="Remaining training time = %d hours %d minutes %d seconds\n"%(h,m,s)
         else:
-            input_image_batch = np.squeeze(np.stack(input_image_batch, axis=1))
-            output_image_batch = np.squeeze(np.stack(output_image_batch, axis=1))
-
-        # Do the training
-        _,current=sess.run([opt,loss],feed_dict={net_input:input_image_batch,net_output:output_image_batch})
-        current_losses.append(current)
-        cnt = cnt + args.batch_size
-        if cnt % 20 == 0:
-            string_print = "Epoch = %d Count = %d/%d Current_Loss = %.4f Time = %.2f"%(epoch,cnt,len(train_input_names),current,time.time()-st)
-            utils.LOG(string_print)
-            st = time.time()
-
-    mean_loss = np.mean(current_losses)
-    avg_loss_per_epoch.append(mean_loss)
-
-    # Create directories if needed
-    if not os.path.isdir("%s/%04d"%("checkpoints",epoch)):
-        os.makedirs("%s/%04d"%("checkpoints",epoch))
-
-    # Save latest checkpoint to same file name
-    print("Saving latest checkpoint:", model_checkpoint_name)
-    saver.save(sess,model_checkpoint_name)
-
-    if val_indices != 0 and epoch % args.checkpoint_step == 0:
-        epoch_ckpt_filename = "%s/%04d/model.ckpt"%("checkpoints",epoch)
-        print("Saving checkpoint for this epoch:",epoch_ckpt_filename)
-        saver.save(sess,epoch_ckpt_filename)
-
-
-    if epoch % args.validation_step == 0:
-        print("Performing validation")
-        target=open("%s/%04d/val_scores.csv"%("checkpoints",epoch),'w')
-        target.write("val_name, avg_accuracy, precision, recall, f1 score, mean iou, %s\n" % (class_names_string))
-
-
+            train_time="Remaining training time : Training completed.\n"
+        utils.LOG(train_time)
         scores_list = []
-        class_scores_list = []
-        precision_list = []
-        recall_list = []
-        f1_list = []
-        iou_list = []
-
-
-        # Do the validation on a small set of validation images
-        for ind in val_indices:
-
-            input_image = utils.load_image(val_input_names[ind])
-            
-            # add the depth as the last channel to input
-            input_depth_image = utils.load_image(val_input_depth_names[ind])
-            input_image = np.dstack((input_image, input_depth_image))
-
-            # crop the exact middle of the image
-            in_h,in_w = input_image.shape[:2]
-            crp_x = int(in_w/2)-int(args.crop_width/2)
-            crp_y = int(in_h/2)-int(args.crop_height/2)
-            
-            input_cropped = input_image[crp_y:crp_y+512,crp_x:crp_x+512]
-            input_image = np.expand_dims(np.float32(input_cropped),axis=0)/255.0
-            
-            gt = utils.load_image(val_output_names[ind])[crp_y:crp_y+512,crp_x:crp_x+512]
-            gt = helpers.reverse_one_hot(helpers.one_hot_it(gt, label_values, tolerance=50))
-
-            # st = time.time()
-
-            output_image = sess.run(network,feed_dict={net_input:input_image})
-
-
-            output_image = np.array(output_image[0,:,:,:])
-            output_image = helpers.reverse_one_hot(output_image)
-            out_vis_image = helpers.colour_code_segmentation(output_image, label_values)
-
-            accuracy, class_accuracies, prec, rec, f1, iou = utils.evaluate_segmentation(pred=output_image, label=gt, num_classes=num_classes)
-
-            file_name = utils.filepath_to_name(val_input_names[ind])
-            target.write("%s, %f, %f, %f, %f, %f"%(file_name, accuracy, prec, rec, f1, iou))
-            for item in class_accuracies:
-                target.write(", %f"%(item))
-            target.write("\n")
-
-            scores_list.append(accuracy)
-            class_scores_list.append(class_accuracies)
-            precision_list.append(prec)
-            recall_list.append(rec)
-            f1_list.append(f1)
-            iou_list.append(iou)
-
-            gt = helpers.colour_code_segmentation(gt, label_values)
-
-            file_name = os.path.basename(val_input_names[ind])
-            file_name = os.path.splitext(file_name)[0]
-            cv2.imwrite("%s/%04d/%s_pred.png"%("checkpoints",epoch, file_name),cv2.cvtColor(np.uint8(out_vis_image), cv2.COLOR_RGB2BGR))
-            cv2.imwrite("%s/%04d/%s_gt.png"%("checkpoints",epoch, file_name),cv2.cvtColor(np.uint8(gt), cv2.COLOR_RGB2BGR))
-
-
-        target.close()
-
-        avg_score = np.mean(scores_list)
-        class_avg_scores = np.mean(class_scores_list, axis=0)
-        avg_scores_per_epoch.append(avg_score)
-        avg_precision = np.mean(precision_list)
-        avg_recall = np.mean(recall_list)
-        avg_f1 = np.mean(f1_list)
-        avg_iou = np.mean(iou_list)
-        avg_iou_per_epoch.append(avg_iou)
-
-        print("\nAverage validation accuracy for epoch # %04d = %f"% (epoch, avg_score))
-        print("Average per class validation accuracies for epoch # %04d:"% (epoch))
-        for index, item in enumerate(class_avg_scores):
-            print("%s = %f" % (class_names_list[index], item))
-        print("Validation precision = ", avg_precision)
-        print("Validation recall = ", avg_recall)
-        print("Validation F1 score = ", avg_f1)
-        print("Validation IoU score = ", avg_iou)
-
-    epoch_time=time.time()-epoch_st
-    remain_time=epoch_time*(args.num_epochs-1-epoch)
-    m, s = divmod(remain_time, 60)
-    h, m = divmod(m, 60)
-    if s!=0:
-        train_time="Remaining training time = %d hours %d minutes %d seconds\n"%(h,m,s)
-    else:
-        train_time="Remaining training time : Training completed.\n"
-    utils.LOG(train_time)
-    scores_list = []
-
-
-    fig1, ax1 = plt.subplots(figsize=(11, 8))
-
-    ax1.plot(range(epoch+1), avg_scores_per_epoch)
-    ax1.set_title("Average validation accuracy vs epochs")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Avg. val. accuracy")
-
-
-    plt.savefig('accuracy_vs_epochs.png')
-
-    plt.clf()
-
-    fig2, ax2 = plt.subplots(figsize=(11, 8))
-
-    ax2.plot(range(epoch+1), avg_loss_per_epoch)
-    ax2.set_title("Average loss vs epochs")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Current loss")
-
-    plt.savefig('loss_vs_epochs.png')
-
-    plt.clf()
-
-    fig3, ax3 = plt.subplots(figsize=(11, 8))
-
-    ax3.plot(range(epoch+1), avg_iou_per_epoch)
-    ax3.set_title("Average IoU vs epochs")
-    ax3.set_xlabel("Epoch")
-    ax3.set_ylabel("Current IoU")
-
-    plt.savefig('iou_vs_epochs.png')
-
-
 
