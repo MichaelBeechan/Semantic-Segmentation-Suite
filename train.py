@@ -320,7 +320,7 @@ with missinglink_project.create_experiment(
                     cv2.imwrite("%s/%04d/%s_gt.png"%("checkpoints",epoch, file_name),cv2.cvtColor(np.uint8(gt), cv2.COLOR_RGB2BGR))
             
             if (len(miou_history) > 0) and (curr_val_miou > np.max(miou_history)):
-                epoch_ckpt_filename = "%s/best_model" + args.model + "_" + os.path.basename(args.dataset) + ".ckpt"%("checkpoints")
+                epoch_ckpt_filename = "%s/best_model_%s_%s.ckpt"%("checkpoints",args.model,os.path.basename(args.dataset))
                 print("Record miou - saving weights for this epoch:",epoch_ckpt_filename)
                 saver.save(sess,epoch_ckpt_filename)
             
