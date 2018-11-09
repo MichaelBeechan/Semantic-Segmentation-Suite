@@ -72,6 +72,9 @@ def build_deeplabv3_plus(inputs, num_classes, preset_model='DeepLabV3+', fronten
       DeepLabV3 model
     """
 
+    if inputs.shape[-1] != 3:
+        inputs = slim.conv2d(inputs, 3, [1,1]) # Total hack: convert input to 3 channels :)
+
     logits, end_points, frontend_scope, init_fn  = frontend_builder.build_frontend(inputs, frontend, pretrained_dir=pretrained_dir, is_training=is_training)
 
 
