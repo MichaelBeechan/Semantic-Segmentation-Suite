@@ -72,6 +72,9 @@ def build_pspnet(inputs, label_size, num_classes, preset_model='PSPNet', fronten
       PSPNet model
     """
 
+    if inputs.shape[-1] != 3:
+        inputs = slim.conv2d(inputs, 3, [1,1]) # Total hack: convert input to 3 channels :)
+
     logits, end_points, frontend_scope, init_fn  = frontend_builder.build_frontend(inputs, frontend, pretrained_dir=pretrained_dir, is_training=is_training)
 
     feature_map_shape = [int(x / 8.0) for x in label_size]
