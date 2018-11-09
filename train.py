@@ -44,6 +44,8 @@ parser.add_argument('--crop_width', type=int, default=512, help='Width of croppe
 parser.add_argument('--batch_size', type=int, default=1, help='Number of images in each batch')
 parser.add_argument('--num_batches', type=int, default=-1, help='Number of batches per epoch, use (-1) to derive from dataset size')
 parser.add_argument('--num_val_images', type=int, default=20, help='The number of images to used for validations')
+parser.add_argument('--num_inter_val_imgs', type=int, default=10, help='Number of images to used for intermediate validation within an epoch')
+parser.add_argument('--num_inter_val_iters', type=int, default=20, help='Number of iterations after which to run intermediate validation')
 parser.add_argument('--h_flip', type=str2bool, default=False, help='Whether to randomly flip the image horizontally for data augmentation')
 parser.add_argument('--v_flip', type=str2bool, default=False, help='Whether to randomly flip the image vertically for data augmentation')
 parser.add_argument('--brightness', type=float, default=None, help='Whether to randomly change the image brightness for data augmentation. Specifies the max bightness change as a factor between 0.0 and 1.0. For example, 0.1 represents a max brightness change of 10%% (+-).')
@@ -251,11 +253,11 @@ with missinglink_project.create_experiment(
             current_losses.append(current)
             cnt = cnt + args.batch_size
             
-            if cnt % 20 == 0:
+            if cnt % int(args.num_inter_val_iters) == 0:
                 val_shuffle = np.random.permutation(len(val_indices))
                 # Do the validation on a small set of validation images
                 with experiment.validation(monitored_metrics={'loss': loss, 'acc': val_acc, 'miou': val_miou}):
-                    for ind in val_shuffle[:10]:
+                    for ind in val_shuffle[:int(args.num_inter_val_imgs)]:
                         rand_ind = val_indices[ind]
                         input_image = utils.load_image(val_input_names[rand_ind])
 
