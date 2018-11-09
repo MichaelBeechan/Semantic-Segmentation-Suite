@@ -42,6 +42,7 @@ parser.add_argument('--dataset', type=str, default="CamVid", help='Dataset you a
 parser.add_argument('--crop_height', type=int, default=512, help='Height of cropped input image to network')
 parser.add_argument('--crop_width', type=int, default=512, help='Width of cropped input image to network')
 parser.add_argument('--batch_size', type=int, default=1, help='Number of images in each batch')
+parser.add_argument('--num_batches', type=int, default=-1, help='Number of batches per epoch, use (-1) to derive from dataset size')
 parser.add_argument('--num_val_images', type=int, default=20, help='The number of images to used for validations')
 parser.add_argument('--h_flip', type=str2bool, default=False, help='Whether to randomly flip the image horizontally for data augmentation')
 parser.add_argument('--v_flip', type=str2bool, default=False, help='Whether to randomly flip the image vertically for data augmentation')
@@ -185,6 +186,9 @@ with missinglink_project.create_experiment(
     
     NUM_SAMPLE = len(train_input_names)
     NUM_BATCHES = int(NUM_SAMPLE / args.batch_size)
+    
+    if int(args.num_batches) > 0:
+        NUM_BATCHES = int(args.num_batches)
 
     miou_history = []
 
