@@ -189,6 +189,8 @@ with missinglink_project.create_experiment(
     
     if int(args.num_batches) > 0:
         NUM_BATCHES = int(args.num_batches)
+        
+    print("Num batches per epoch -->", NUM_BATCHES)
 
     miou_history = []
 
