@@ -180,6 +180,8 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
             
             # add the depth as the last channel to input
             input_depth_image = utils.load_image(train_input_depth_names[id])
+            if len(input_depth_image.shape) == 3 and input_depth_image.shape[2] == 3:
+                input_depth_image = cv2.cvtColor(input_depth_image, cv2.COLOR_BGR2GRAY)
             input_image = np.dstack((input_image, input_depth_image))
 #            print(input_image.shape)
 #            print(pd.DataFrame(input_image.reshape(-1,4)).describe())
@@ -213,7 +215,7 @@ for epoch in range(args.epoch_start_i, args.num_epochs):
         current_losses.append(current)
         cnt = cnt + args.batch_size
         if cnt % 20 == 0:
-            string_print = "Epoch = %d Count = %d Current_Loss = %.4f Time = %.2f"%(epoch,cnt,current,time.time()-st)
+            string_print = "Epoch = %d Count = %d/%d Current_Loss = %.4f Time = %.2f"%(epoch,cnt,len(train_input_names),current,time.time()-st)
             utils.LOG(string_print)
             st = time.time()
 
